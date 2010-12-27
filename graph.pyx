@@ -1,8 +1,6 @@
-cimport python as py
-
+cimport cpython as cpy
 from collections import deque
 
-    
 #------------------------------------------------------------------------------
 # Exception Types
 #------------------------------------------------------------------------------
@@ -22,6 +20,67 @@ class CycleError(GraphError):
 
 
 #------------------------------------------------------------------------------
+# Stack
+#------------------------------------------------------------------------------
+
+cdef class Stack:
+    """ A C-array based PyObject* stack implementation.
+
+    """
+    cdef cpy.PyObject** _stack
+    cdef int _stack_marker
+    cdef int _stack_size
+
+    def __cinit__(self, int init_size):
+        cdef void* mem
+
+        mem = <cpy.PyObject**>cpy.PyMem_Malloc(<size_t>(sizeof(cpy.PyObject*) * init_size))
+        if mem is NULL:
+            raise MemoryError("Could not allocate stack of %s elements" % init_size)
+
+        self._stack = <cpy.PyObject**>mem
+        self._stack_marker = -1
+        self._stack_size = init_size
+
+    def __dealloc__(self):
+        cpy.PyMem_Free(<void*>self._stack)
+
+    cdef inline bint empty(self):
+        return self._stack_marker == -1
+
+    cdef _realloc_stack(self):
+        cdef int new_size = self._stack_size * 2
+        cdef void* mem
+
+        mem = <cpy.PyObject**>cpy.PyMem_Realloc(<void*>self._stack, <size_t>(sizeof(cpy.PyObject*) * new_size))
+        if mem is NULL:
+            raise MemoryError("Could not reallocate stack of %s elements" % new_size)
+
+        self._stack = <cpy.PyObject**>mem
+        self._stack_size = new_size
+
+    cdef push(self, content):
+        cdef int marker = self._stack_marker + 1
+
+        if marker >= self._stack_size:
+            self._realloc_stack()
+
+        cpy.Py_INCREF(content)
+        self._stack[marker] = <cpy.PyObject*>content
+        self._stack_marker = marker
+
+    cdef pop(self):
+        if self.empty():
+            raise ValueError('Pop from empty stack.')
+
+        content = <object>self._stack[self._stack_marker]
+        self._stack_marker -= 1
+        cpy.Py_DECREF(content)
+
+        return content
+
+
+#------------------------------------------------------------------------------
 # Node Type
 #------------------------------------------------------------------------------
 
@@ -35,35 +94,106 @@ cdef class _Node:
     
     """
     cdef object content
-    cdef set parents
-    cdef set children
-    cdef int has_parents
-    cdef int has_children
+    cdef list parents
+    cdef list children
+    cdef bint _check_parent_dups
+    cdef bint _check_child_dups
 
     def __cinit__(self, content):
         self.content = content
-        self.parents = set()
-        self.children = set()
-        self.has_parents = 0
-        self.has_children = 0
+        self.children = list()
+        self.parents = list() 
+        self._check_parent_dups = True
+        self._check_child_dups = True
 
-    cdef add_parent(self, _Node parent):
-        self.parents.add(<object>parent)
-        self.has_parents = 1
+    cdef inline bint has_children(self):
+        return (<int>len(self.children)) > 0
 
-    cdef add_child(self, _Node child):
-        self.children.add(<object>child)
-        self.has_children = 1
+    cdef inline bint has_parents(self):
+        return (<int>len(self.parents)) > 0
 
-    cdef remove_parent(self, _Node parent):
-        self.parents.discard(<object>parent)
-        if not self.parents:
-            self.has_parents = 0
+    cdef inline void check_child_dups(self, bint val):
+        self._check_child_dups = val
+        if val:
+            self.children = remove_list_duplicates(self.children)
+        
+    cdef inline void check_parent_dups(self, bint val):
+        self._check_parent_dups = val
+        if val:
+            self.parents = remove_list_duplicates(self.parents)
 
-    cdef remove_child(self, _Node child):
-        self.children.discard(<object>child)
-        if not self.children:
-            self.has_children = 0
+    cdef void add_parent(self, _Node parent):
+        if self._check_parent_dups:
+            if list_contains(self.parents, parent):
+                pass
+            else:
+                self.parents.append(parent)
+        else:
+            self.parents.append(parent)
+
+    cdef void add_child(self, _Node child):
+        if self._check_child_dups:
+            if list_contains(self.children, child):
+                pass
+            else:
+                self.children.append(child)
+        else:
+            self.children.append(child)
+
+    cdef void remove_parent(self, _Node parent):
+        if list_contains(self.parents, parent):
+            self.parents.remove(parent)
+
+    cdef void remove_child(self, _Node child):
+        if list_contains(self.children, child):
+            self.children.remove(child)
+
+
+#------------------------------------------------------------------------------
+# Utility functions
+#------------------------------------------------------------------------------
+
+cdef inline void push_children(Stack stack, _Node node):
+    """ Push the children of `node` onto `stack`. This function
+    allows decoupling of the the implementation of _Node children
+    from the methods which need to push them onto a stack.
+
+    """
+    for obj in node.children:
+        stack.push(obj)    
+
+
+cdef inline void push_parents(Stack stack, _Node node):
+    """ Push the parents of `node` onto `stack`. This function
+    allows decoupling of the the implementation of _Node parents
+    from the methods which need to push them onto a stack.
+
+    """
+    for obj in node.parents:
+        stack.push(obj)
+
+
+cdef inline bint list_contains(list objects, object item):
+    cdef bint res = False
+
+    for obj in objects:
+        if obj is item:
+            res = True
+            break
+
+    return res 
+
+
+cdef list remove_list_duplicates(list objects):
+    cdef set set_objects = set()
+    cdef list new_objects = list()
+    
+    for obj in objects:
+        if obj not in set_objects:
+            new_objects.append(obj)
+            set_objects.add(obj)
+    
+    return new_objects
 
 
 #------------------------------------------------------------------------------
@@ -79,21 +209,21 @@ cdef class _IterDFSDown(object):
     `iter_dfs_down` method of a DAGraph instance. 
     
     """
-    cdef object stack
+    cdef Stack stack
 
     def __init__(self, _Node start_node):
-        self.stack = deque(start_node.children)
+        self.stack = Stack(2048)
+        push_children(self.stack, start_node)
 
     def __iter__(self):
         return self
 
     def __next__(self):
-        if not self.stack:
+        if self.stack.empty():
             raise StopIteration
 
         curr = <_Node>self.stack.pop()
-        if curr.has_children:
-            self.stack.extend(curr.children)
+        push_children(self.stack, curr)
 
         return curr.content
 
@@ -107,21 +237,21 @@ cdef class _IterDFSUp(object):
     `iter_dfs_up` method of a DAGraph instance. 
     
     """
-    cdef object stack
+    cdef Stack stack
 
     def __init__(self, _Node start_node):
-        self.stack = deque(start_node.parents)
+        self.stack = Stack(2048)
+        push_parents(self.stack, start_node)
 
     def __iter__(self):
         return self
 
     def __next__(self):
-        if self.stack:
+        if self.stack.empty():
             raise StopIteration
 
         curr = <_Node>self.stack.pop()
-        if curr.has_parents:
-            self.stack.extend(curr.parents)
+        push_parents(self.stack, curr)
 
         return curr.content
 
@@ -136,7 +266,6 @@ cdef class _IterBFSDown(object):
     
     """
     cdef object stack
-    cdef int stack_marker
 
     def __init__(self, _Node start_node):
         self.stack = deque(start_node.children)
@@ -149,7 +278,7 @@ cdef class _IterBFSDown(object):
             raise StopIteration
 
         curr = <_Node>self.stack.popleft()
-        if curr.has_children:
+        if curr.has_children():
             self.stack.extend(curr.children)
 
         return curr.content
@@ -177,209 +306,209 @@ cdef class _IterBFSUp(object):
             raise StopIteration
 
         curr = <_Node>self.stack.popleft()
-        if curr.has_parents:
+        if curr.has_parents():
             self.stack.extend(curr.parents)
 
         return curr.content
 
 
-cdef class _IterDFSDownLevel(object):
-    """ A depth first iterator that traverses the DAGraph downward
-    from a given node, yielding the graph level offset in addition 
-    to the node.
-    
-    This private class is intended for use solely by the DAGraph.
-    Instances of this iterator are returned by calling the 
-    `iter_dfs_down_level` method of a DAGraph instance.
-    
-    """
-    cdef object stack
-    cdef int level
-    cdef object level_markers
+#cdef class _IterDFSDownLevel(object):
+#    """ A depth first iterator that traverses the DAGraph downward
+#    from a given node, yielding the graph level offset in addition 
+#    to the node.
+#    
+#    This private class is intended for use solely by the DAGraph.
+#    Instances of this iterator are returned by calling the 
+#    `iter_dfs_down_level` method of a DAGraph instance.
+#    
+#    """
+#    cdef object stack
+#    cdef int level
+#    cdef object level_markers
+#
+#    def __init__(self, _Node start_node):
+#        self.stack = deque(start_node.children)
+#        self.level = 1
+#        if self.stack:
+#            self.level_markers = deque()
+#            self.level_markers.append(self.stack[0])
+#        else:
+#            self.level_markers = None
+#
+#    def __iter__(self):
+#        return self
+#
+#    def __next__(self):
+#        if not self.stack:
+#            raise StopIteration
+#
+#        ret_level = self.level
+#
+#        curr = self.stack.pop()
+#
+#        if curr is self.level_markers[-1]:
+#            if not (<_Node>curr).has_children:
+#                self.level -= 1
+#            self.level_markers.pop()
+#            
+#        if (<_Node>curr).has_children:
+#            idx = len(self.stack)
+#            self.stack.extend((<_Node>curr).children)
+#            self.level_markers.append(self.stack[idx])
+#            self.level += 1
+#
+#        return (<_Node>curr).content, ret_level
+#
+#
+#cdef class _IterDFSUpLevel(object):
+#    """ A depth first iterator that traverses the DAGraph upward
+#    from a given node, yielding the graph level offset in addition 
+#    to the node.
+# 
+#    
+#    This private class is intended for use solely by the DAGraph.
+#    Instances of this iterator are returned by calling the 
+#    `iter_dfs_up_level` method of a DAGraph instance. 
+#    
+#    """
+#    cdef object stack
+#    cdef int level
+#    cdef object level_markers
+#
+#    def __init__(self, _Node start_node):
+#        self.stack = deque(start_node.parents)
+#        self.level = 1
+#        if self.stack:
+#            self.level_markers = deque()
+#            self.level_markers.append(self.stack[0])
+#        else:
+#            self.level_markers = None
+#
+#    def __iter__(self):
+#        return self
+#
+#    def __next__(self):
+#        if not self.stack:
+#            raise StopIteration
+#
+#        ret_level = self.level
+#
+#        curr = self.stack.pop()
+#
+#        if curr is self.level_markers[-1]:
+#            if not (<_Node>curr).has_parents:
+#                self.level -= 1
+#            self.level_markers.pop()
+#
+#        if (<_Node>curr).has_parents():
+#            idx = len(self.stack)
+#            self.stack.extend((<_Node>curr).parents)
+#            self.level_markers.append(self.stack[idx])
+#            self.level += 1
+#
+#        return (<_Node>curr).content, ret_level
+#
+# 
+#cdef class _IterBFSDownLevel(object):
+#    """ A breadth first iterator that traverses the DAGraph downward
+#    from a given node, yielding the graph level offset in addition 
+#    to the node.
+#
+#   
+#    This private class is intended for use solely by the DAGraph.
+#    Instances of this iterator are returned by calling the 
+#    `iter_bfs_down_level` method of DAGraph instance.
+#    
+#    """
+#    cdef object stack
+#    cdef int level
+#    cdef object level_marker
+#
+#    def __init__(self, _Node start_node):
+#        self.stack = deque(start_node.children)
+#        self.level = 1
+#        if self.stack:
+#            self.level_marker = self.stack[-1]
+#        else:
+#            self.level_marker = None
+#
+#    def __iter__(self):
+#        return self
+#
+#    def __next__(self):
+#        if not self.stack:
+#            raise StopIteration
+#
+#        ret_level = self.level
+#
+#        curr = self.stack.popleft()
+#
+#        if (<_Node>curr).has_children():
+#            self.stack.extend((<_Node>curr).children)
+#
+#        if curr is self.level_marker:
+#            self.level += 1
+#            if self.stack:
+#                self.level_marker = self.stack[-1]
+#            else:
+#                self.level_marker = None
+#
+#        return (<_Node>curr).content, ret_level
+# 
+#
+#cdef class _IterBFSUpLevel(object):
+#    """ A breadth first iterator that traverses the DAGraph upward
+#    from a given node, yielding the graph level offset in addition 
+#    to the node.
+# 
+#    
+#    This private class is intended for use solely by the DAGraph.
+#    Instances of this iterator are returned by calling the 
+#    `iter_bfs_up_level` method of DAGraph instance.
+#    
+#    """
+#    cdef object stack
+#    cdef int level
+#    cdef object level_marker
+#
+#    def __init__(self, _Node start_node):
+#        self.stack = deque(start_node.parents)
+#        self.level = 1
+#        if self.stack:
+#            self.level_marker = self.stack[-1]
+#        else:
+#            self.level_marker = None
+#
+#    def __iter__(self):
+#        return self
+#
+#    def __next__(self):
+#        if not self.stack:
+#            raise StopIteration
+#
+#        ret_level = self.level
+#
+#        curr = self.stack.popleft()
+#
+#        if (<_Node>curr).has_parents():
+#            self.stack.extend((<_Node>curr).parents)
+#
+#        if curr is self.level_marker:
+#            self.level += 1
+#            if self.stack:
+#                self.level_marker = self.stack[-1]
+#            else:
+#                self.level_marker = None
+#
+#        return (<_Node>curr).content, ret_level
 
-    def __init__(self, _Node start_node):
-        self.stack = deque(start_node.children)
-        self.level = 1
-        if self.stack:
-            self.level_markers = deque()
-            self.level_markers.append(self.stack[0])
-        else:
-            self.level_markers = None
 
-    def __iter__(self):
-        return self
-
-    def __next__(self):
-        if not self.stack:
-            raise StopIteration
-
-        ret_level = self.level
-
-        curr = self.stack.pop()
-
-        if curr is self.level_markers[-1]:
-            if not (<_Node>curr).has_children:
-                self.level -= 1
-            self.level_markers.pop()
-            
-        if (<_Node>curr).has_children:
-            idx = len(self.stack)
-            self.stack.extend((<_Node>curr).children)
-            self.level_markers.append(self.stack[idx])
-            self.level += 1
-
-        return (<_Node>curr).content, ret_level
-
-
-cdef class _IterDFSUpLevel(object):
-    """ A depth first iterator that traverses the DAGraph upward
-    from a given node, yielding the graph level offset in addition 
-    to the node.
- 
-    
-    This private class is intended for use solely by the DAGraph.
-    Instances of this iterator are returned by calling the 
-    `iter_dfs_up_level` method of a DAGraph instance. 
-    
-    """
-    cdef object stack
-    cdef int level
-    cdef object level_markers
-
-    def __init__(self, _Node start_node):
-        self.stack = deque(start_node.parents)
-        self.level = 1
-        if self.stack:
-            self.level_markers = deque()
-            self.level_markers.append(self.stack[0])
-        else:
-            self.level_markers = None
-
-    def __iter__(self):
-        return self
-
-    def __next__(self):
-        if not self.stack:
-            raise StopIteration
-
-        ret_level = self.level
-
-        curr = self.stack.pop()
-
-        if curr is self.level_markers[-1]:
-            if not (<_Node>curr).has_parents:
-                self.level -= 1
-            self.level_markers.pop()
-
-        if (<_Node>curr).has_parents:
-            idx = len(self.stack)
-            self.stack.extend((<_Node>curr).parents)
-            self.level_markers.append(self.stack[idx])
-            self.level += 1
-
-        return (<_Node>curr).content, ret_level
-
- 
-cdef class _IterBFSDownLevel(object):
-    """ A breadth first iterator that traverses the DAGraph downward
-    from a given node, yielding the graph level offset in addition 
-    to the node.
-
-   
-    This private class is intended for use solely by the DAGraph.
-    Instances of this iterator are returned by calling the 
-    `iter_bfs_down_level` method of DAGraph instance.
-    
-    """
-    cdef object stack
-    cdef int level
-    cdef object level_marker
-
-    def __init__(self, _Node start_node):
-        self.stack = deque(start_node.children)
-        self.level = 1
-        if self.stack:
-            self.level_marker = self.stack[-1]
-        else:
-            self.level_marker = None
-
-    def __iter__(self):
-        return self
-
-    def __next__(self):
-        if not self.stack:
-            raise StopIteration
-
-        ret_level = self.level
-
-        curr = self.stack.popleft()
-
-        if (<_Node>curr).has_children:
-            self.stack.extend((<_Node>curr).children)
-
-        if curr is self.level_marker:
-            self.level += 1
-            if self.stack:
-                self.level_marker = self.stack[-1]
-            else:
-                self.level_marker = None
-
-        return (<_Node>curr).content, ret_level
- 
-
-cdef class _IterBFSUpLevel(object):
-    """ A breadth first iterator that traverses the DAGraph upward
-    from a given node, yielding the graph level offset in addition 
-    to the node.
- 
-    
-    This private class is intended for use solely by the DAGraph.
-    Instances of this iterator are returned by calling the 
-    `iter_bfs_up_level` method of DAGraph instance.
-    
-    """
-    cdef object stack
-    cdef int level
-    cdef object level_marker
-
-    def __init__(self, _Node start_node):
-        self.stack = deque(start_node.parents)
-        self.level = 1
-        if self.stack:
-            self.level_marker = self.stack[-1]
-        else:
-            self.level_marker = None
-
-    def __iter__(self):
-        return self
-
-    def __next__(self):
-        if not self.stack:
-            raise StopIteration
-
-        ret_level = self.level
-
-        curr = self.stack.popleft()
-
-        if (<_Node>curr).has_parents:
-            self.stack.extend((<_Node>curr).parents)
-
-        if curr is self.level_marker:
-            self.level += 1
-            if self.stack:
-                self.level_marker = self.stack[-1]
-            else:
-                self.level_marker = None
-
-        return (<_Node>curr).content, ret_level
-
-
-cdef class _BaseNodeIterator(object):
+cdef class _IterParentless(object):
     
     cdef object node_iterator
 
     def __cinit__(self, iterator):
-        if not py.PyIter_Check(iterator):
+        if not cpy.PyIter_Check(iterator):
             raise TypeError('Argument must be an iterator.')
         
         self.node_iterator = iterator
@@ -388,49 +517,76 @@ cdef class _BaseNodeIterator(object):
         return self
 
     def __next__(self):
-        raise StopIteration
-
-
-cdef class _IterParentless(_BaseNodeIterator):
-
-    def __next__(self):
         while True:
-            cnode = <_Node>py.PyIter_Next(self.node_iterator)
+            cnode = <_Node>cpy.PyIter_Next(self.node_iterator)
             if <void*>cnode == NULL:
                 raise StopIteration
 
-            if not cnode.has_parents and cnode.has_children:
+            if not cnode.has_parents() and cnode.has_children():
                 return cnode.content
 
 
-cdef class _IterChildless(_BaseNodeIterator):
+cdef class _IterChildless(object):
+    
+    cdef object node_iterator
+
+    def __cinit__(self, iterator):
+        if not cpy.PyIter_Check(iterator):
+            raise TypeError('Argument must be an iterator.')
+        
+        self.node_iterator = iterator
+
+    def __iter__(self):
+        return self
 
     def __next__(self):
         while True:
-            cnode = <_Node>py.PyIter_Next(self.node_iterator)
+            cnode = <_Node>cpy.PyIter_Next(self.node_iterator)
             if <void*>cnode == NULL:
                 raise StopIteration
 
-            if cnode.has_parents and not cnode.has_children:
+            if cnode.has_parents() and not cnode.has_children():
                 return cnode.content
 
 
-cdef class _IterOrphans(_BaseNodeIterator):
+cdef class _IterOrphans(object):
+    
+    cdef object node_iterator
+
+    def __cinit__(self, iterator):
+        if not cpy.PyIter_Check(iterator):
+            raise TypeError('Argument must be an iterator.')
+        
+        self.node_iterator = iterator
+
+    def __iter__(self):
+        return self
 
     def __next__(self):
         while True:
-            cnode = <_Node>py.PyIter_Next(self.node_iterator)
+            cnode = <_Node>cpy.PyIter_Next(self.node_iterator)
             if <void*>cnode == NULL:
                 raise StopIteration
 
-            if not cnode.has_parents and not cnode.has_children:
+            if not cnode.has_parents() and not cnode.has_children():
                 return cnode.content
 
 
-cdef class _IterContent(_BaseNodeIterator):
+cdef class _IterContent(object):
+    
+    cdef object node_iterator
+
+    def __cinit__(self, iterator):
+        if not cpy.PyIter_Check(iterator):
+            raise TypeError('Argument must be an iterator.')
+        
+        self.node_iterator = iterator
+
+    def __iter__(self):
+        return self
 
     def __next__(self):
-        cnode = <_Node>py.PyIter_Next(self.node_iterator)
+        cnode = <_Node>cpy.PyIter_Next(self.node_iterator)
         if <void*>cnode == NULL:
             raise StopIteration
   
@@ -454,17 +610,17 @@ cdef class DAGraph(object):
     #------------------------------------------------------------------
     # Initialization
     #------------------------------------------------------------------
-    cdef dict graph_nodes
-    cdef int detect_cycles
+    cdef dict _graph_nodes
+    cdef bint _detect_cycles
 
     def __cinit__(self):
-        self.graph_nodes = {}
-        self.detect_cycles = 1
+        self._graph_nodes = {}
+        self._detect_cycles = True
 
     #------------------------------------------------------------------
     # Fast C-only methods
     #------------------------------------------------------------------
-    cdef inline int contains(self, content):
+    cdef inline bint contains(self, content):
         """ Return whether the graph contains a node referencing `content`.
 
         If the graph contains a _Node which holds a reference to the
@@ -481,9 +637,12 @@ cdef class DAGraph(object):
             1 if `content` is in the graph, 0 otherwise. 
 
         """
-        if content not in self.graph_nodes:
-            return 0
-        return 1
+        cdef bint res = False
+
+        if content in self._graph_nodes:
+            res = True
+
+        return res
     
     cdef inline _Node get_node(self, content):
         """ Return the _Node instance which contains `content`.
@@ -503,39 +662,7 @@ cdef class DAGraph(object):
             The node which holds a references `content`.
 
         """
-        return <_Node>self.graph_nodes[content]
-
-    cdef void delete_node(self, content):
-        """ Delete a node from the graph.
-
-        If the graph contains a node which references the object
-        `content`, delete that node and any edges to that node. 
-        Otherwise, do nothing.
-
-        Parameters
-        ----------
-        content : hashable object
-            The _Node instance in the graph containing a reference
-            to this object will be deleting along with any of its
-            edges.
-
-        Returns
-        -------
-        None
-
-        """
-        if not self.contains(content):
-            return 
-
-        node = self.get_node(content)
-        
-        for parent in node.parents:
-            parent.remove_child(node)
-
-        for child in node.children:
-            child.remove_parent(node)
-
-        del self.graph_nodes[content]
+        return <_Node>self._graph_nodes[content]
 
     cdef cycle_detect(self, _Node node):
         """ Detect a cycle in the graph starting at `node`.
@@ -551,21 +678,23 @@ cdef class DAGraph(object):
 
         Returns
         -------
-        out : list
-            If a cycle is detected, the list will contain the 
-            nodal contents of each node in the depth first 
-            search with first and last element being the same 
-            object. Otherwise, the list will be empty.
+        out : tuple
+            If a cycle is detected, the tuple will contain the 
+            start node of the search and the node visited just 
+            before the completion of the cycle (i.e. revisiting 
+            the start node). Otherwise, the tuple will be empty.
 
         """
         start = node.content
-        res = [start]
+        last = None
+
         for child in _IterDFSDown(node):
-            res.append(child)
             if child is start:
-                return res
-        else:
-            return []
+                return (start, last)
+            else:
+                last = child
+        
+        return ()
 
     #------------------------------------------------------------------
     # Python special methods
@@ -575,28 +704,28 @@ cdef class DAGraph(object):
         by every node in the graph, in no particular order.
 
         """
-        return self.graph_nodes.iterkeys()
+        return self._graph_nodes.iterkeys()
 
     def __contains__(self, item):
         """ Returns True if `item` is referenced by a node in the graph;
         False otherwise.
 
         """
-        return item in self.graph_nodes
+        return item in self._graph_nodes
    
     def __len__(self):
         """ Returns the number of nodes in the graph.
 
         """
-        return len(self.graph_nodes)
+        return len(self._graph_nodes)
 
     #------------------------------------------------------------------
     # Graph behavior modification
     #------------------------------------------------------------------
-    def disable_cycle_detection(self):
-        """ disable_cycle_detection()
+    def detect_cycles(self, bint val):
+        """ cycle_detect(bool)
 
-        Turn off the graph's cycle detector.
+        Turn on/off the graph's cycle detector.
 
         By default, the graph's cycle detector is turned on.
         The graph is checked for cycles each time an edge is added,
@@ -607,45 +736,15 @@ cdef class DAGraph(object):
 
         Parameters
         ----------
-        None
+        val : boolean
+            Should the cycle detector be on or off.
 
         Returns
         -------
         None
 
-        See Also
-        --------
-        enable_cycle_detection : Turn on the graph's cycle detector.
-
         """
-        self.detect_cycles = 0
-
-    def enable_cycle_detection(self):
-        """ enable_cycle_detection()
-
-        Turn on the graph's cycle detector.
-
-        By default, the graph's cycle detector is turned on.
-        The graph is checked for cycles each time an edge is added,
-        and a CycleError is raised if one is detected. The cycle 
-        detector should be left on unless there is absolute certainty 
-        that the edges being added will not cause a cycle and the 
-        overhead of running the cycle detector is excessive.
-
-        Parameters
-        ----------
-        None
-
-        Returns
-        -------
-        None
-
-        See Also
-        --------
-        disable_cycle_detection : Turn off the graph's cycle detector.
-
-        """
-        self.detect_cycles = 1
+        self._detect_cycles = val
 
     #------------------------------------------------------------------
     # Graph structure modification
@@ -671,19 +770,14 @@ cdef class DAGraph(object):
         None
 
         """
-        try:
-            hash(node)
-        except TypeError:
-            raise GraphError("Graph nodes must be hashable python objects.")
-       
         if self.contains(node):
             return
 
         graph_node = _Node(node)
-        self.graph_nodes[node] = graph_node
+        self._graph_nodes[node] = graph_node
 
-    cpdef remove_node(self, node):
-        """ remove_node(node)
+    cpdef delete_node(self, node):
+        """ delete_node(node)
         
         Delete a node from the graph.
 
@@ -700,7 +794,18 @@ cdef class DAGraph(object):
         None
 
         """
-        self.delete_node(node)
+        if not self.contains(node):
+            return 
+
+        graph_node = self.get_node(node)
+        
+        for parent in graph_node.parents:
+            parent.remove_child(graph_node)
+
+        for child in graph_node.children:
+            child.remove_parent(graph_node)
+
+        del self._graph_nodes[node]
 
     cpdef add_edge(self, source, target):
         """ add_edge(source, target)
@@ -745,12 +850,13 @@ cdef class DAGraph(object):
         
         source_node.add_child(target_node)
         target_node.add_parent(source_node)
-        if self.detect_cycles:
+
+        if self._detect_cycles:
             cycle = self.cycle_detect(source_node)
             if cycle:
                 raise CycleError(cycle)
 
-    cpdef add_edges_parents(self, sources, target):
+    cpdef add_edges_parents(self, tuple sources, target):
         """ add_edges_parents(sources, target)
 
         Add an edge between many-to-one nodes.
@@ -767,7 +873,7 @@ cdef class DAGraph(object):
 
         Parameters
         ----------
-        sources : iterable of hashable objects
+        sources : tuple of hashable objects
             The parent nodes.
         target : hashable object
             The child node.
@@ -785,24 +891,41 @@ cdef class DAGraph(object):
         remove_edges_children : Remove one-to-many edges.
 
         """
-        for source in sources:
-            if not self.contains(source):
-                self.add_node(source) 
+        cdef bint disable_dup_checking
+        cdef _Node source_node, target_node
 
         if not self.contains(target):
             self.add_node(target) 
 
         target_node = self.get_node(target)
+        disable_dup_checking = (len(sources) >= 1000)
+
+        if disable_dup_checking:
+            # 1000 elements is approx. the number necessary such that
+            # checking for duplicates with set operations results
+            # in a gain, vs a linear search over the children.
+            target_node.check_parent_dups(False)
+
         for source in sources:
+            if not self.contains(source):
+                self.add_node(source)
             source_node = self.get_node(source)
             target_node.add_parent(source_node)
             source_node.add_child(target_node)
-            if self.detect_cycles:
+        
+        if disable_dup_checking:
+            # re-enabling duplicate checking will uniqify the 
+            # the child list
+            target_node.check_parent_dups(True)
+
+        if self._detect_cycles:
+            for source in sources:
+                source_node = self.get_node(source)
                 cycle = self.cycle_detect(source_node)
                 if cycle:
                     raise CycleError(cycle)
 
-    cpdef add_edges_children(self, source, targets):
+    cpdef add_edges_children(self, source, tuple targets):
         """ add_edge_parents(source, targets)
 
         Add an edge between one-to-many nodes.
@@ -821,7 +944,7 @@ cdef class DAGraph(object):
         ----------
         source : hashable object
             The parent node.
-        targets : iterable of hashable objects
+        targets : tuple of hashable objects
             The child nodes.
 
         Returns
@@ -837,22 +960,37 @@ cdef class DAGraph(object):
         remove_edges_children : Remove one-to-many edges.
 
         """
+        cdef bint disable_dup_checking
+        cdef _Node target_node, source_node
+
         if not self.contains(source):
             self.add_node(source) 
         
+        source_node = self.get_node(source)
+        disable_dup_checking = (len(targets) >= 1000)
+
+        if disable_dup_checking:
+            # 1000 elements is approx. the number necessary such that
+            # checking for duplicates with set operations results
+            # in a gain, vs a linear search over the children.
+            source_node.check_child_dups(False)
+
         for target in targets:
             if not self.contains(target):
-                self.add_node(target) 
-
-        source_node = self.get_node(source)
-        for target in targets:
+                self.add_node(target)
             target_node = self.get_node(target)
             target_node.add_parent(source_node)
             source_node.add_child(target_node)
-            if self.detect_cycles:
-                cycle = self.cycle_detect(source_node)
-                if cycle:
-                    raise CycleError(cycle)
+
+        if disable_dup_checking:
+            # re-enabling duplicate checking will uniqify the 
+            # the child list
+            source_node.check_child_dups(True)
+
+        if self._detect_cycles:
+            cycle = self.cycle_detect(source_node)
+            if cycle:
+                raise CycleError(cycle)
 
     cpdef remove_edge(self, source, target):
         """ remove_edge(source, target)
@@ -892,7 +1030,7 @@ cdef class DAGraph(object):
         target_node.remove_parent(source_node)
         source_node.remove_child(target_node)
 
-    cpdef remove_edges_parents(self, sources, target):
+    cpdef remove_edges_parents(self, tuple sources, target):
         """ remove_edges_parents(sources, target)
 
         Remove many-to-ones edge.
@@ -904,7 +1042,7 @@ cdef class DAGraph(object):
 
         Parameters
         ----------
-        sources : iterable of hashable object
+        sources : tuple of hashable objects
             The parent nodes.
         target : hashable object
             The child node.
@@ -933,7 +1071,7 @@ cdef class DAGraph(object):
             target_node.remove_parent(source_node)
             source_node.remove_child(target_node)
 
-    cpdef remove_edges_children(self, source, targets):
+    cpdef remove_edges_children(self, source, tuple targets):
         """ remove_edges_children(source, targets)
 
         Remove one-to-many edges.
@@ -994,136 +1132,136 @@ cdef class DAGraph(object):
         None
 
         """
-        for node in self.graph_nodes.itervalues():
+        for node in self._graph_nodes.itervalues():
             cnode = <_Node>node
             cnode.children, cnode.parents = cnode.parents, cnode.children
 
     #------------------------------------------------------------------
     # Graph introspection
     #------------------------------------------------------------------
-    cpdef parentless(self):
-        """ parentless()
-
-        Returns an iterator which returns nodes in the graph without parents.
-
-        Nodes without parents are root/toplevel nodes. If the graph
-        were traversed in a upward direction, these would be the
-        terminating nodes.
-
-        Parameters
-        ----------
-        None
-
-        Returns
-        -------
-        out : iterator
-            An iterator which returns nodes in the graph with no parents.
-
-        """
-        return _IterParentless(self.graph_nodes.itervalues())
-
-    cpdef childless(self):
-        """ childless()
-
-        Returns an iterator which returns nodes in the graph without children.
-
-        Nodes without children are leaf/terminal nodes. If the graph
-        were traversed in a downward direction, these would be the
-        terminating nodes.
-
-        Parameters
-        ----------
-        None
-
-        Returns
-        -------
-        out : iterator
-            An iterator which returns nodes in the graph with no children.
-
-        """
-        return _IterChildless(self.graph_nodes.itervalues())
-
-    cpdef orphans(self):
-        """ orphans()
-
-        Returns an iterator which returns nodes in the graph without 
-        parents or children.
-
-        Nodes without parents children are orphan nodes. These nodes
-        are unreachable by traversing the graph from any other node.
-
-        Parameters
-        ----------
-        None
-
-        Returns
-        -------
-        out : iterator
-            An iterator which returns nodes in the graph with no 
-            parents or children.
-
-        """
-        return _IterOrphans(self.graph_nodes.itervalues())
-
-    cpdef children(self, node):
-        """ children(node)
-
-        Return the children of a given node.
-
-        The children of a node are those nodes directly below 
-        the given node in the graph. If the given node is not 
-        contained in the graph, a GraphError is raised.
-
-        Parameters
-        ----------
-        node : hashable object
-            The parent node.
-
-        Returns
-        -------
-        out : list
-            The children of the given node. Will be empty if the
-            node has no children.
-
-        """
-        if not self.contains(node):
-            raise GraphError("Node `%s` does not exist in the graph." % node)
-
-        graph_node = self.get_node(node)
-        return _IterContent(iter(graph_node.parents))
-
-    cpdef parents(self, node):
-        """ parents(node)
-
-        Return the parents of a given node.
-
-        The parents of a node are those nodes directly above 
-        the given node in the graph. A node may have more than 
-        one parent. If the given node is not contained in the 
-        graph, a GraphError is raised.
-
-        Parameters
-        ----------
-        node : hashable object
-            The child node.
-
-        Returns
-        -------
-        out : list
-            The parents of the given node. Will be empty if the
-            node has no parents.
-
-        """
-        if not self.contains(node):
-            raise GraphError("Node `%s` does not exist in the graph." % node)
-        
-        graph_node = self.get_node(node)
-        return _IterContent(iter(graph_node.parents))
+#    cpdef parentless(self):
+#        """ parentless()
+#
+#        Returns an iterator which returns nodes in the graph without parents.
+#
+#        Nodes without parents are root/toplevel nodes. If the graph
+#        were traversed in a upward direction, these would be the
+#        terminating nodes.
+#
+#        Parameters
+#        ----------
+#        None
+#
+#        Returns
+#        -------
+#        out : iterator
+#            An iterator which returns nodes in the graph with no parents.
+#
+#        """
+#        return _IterParentless(self._graph_nodes.itervalues())
+#
+#    cpdef childless(self):
+#        """ childless()
+#
+#        Returns an iterator which returns nodes in the graph without children.
+#
+#        Nodes without children are leaf/terminal nodes. If the graph
+#        were traversed in a downward direction, these would be the
+#        terminating nodes.
+#
+#        Parameters
+#        ----------
+#        None
+#
+#        Returns
+#        -------
+#        out : iterator
+#            An iterator which returns nodes in the graph with no children.
+#
+#        """
+#        return _IterChildless(self._graph_nodes.itervalues())
+#
+#    cpdef orphans(self):
+#        """ orphans()
+#
+#        Returns an iterator which returns nodes in the graph without 
+#        parents or children.
+#
+#        Nodes without parents children are orphan nodes. These nodes
+#        are unreachable by traversing the graph from any other node.
+#
+#        Parameters
+#        ----------
+#        None
+#
+#        Returns
+#        -------
+#        out : iterator
+#            An iterator which returns nodes in the graph with no 
+#            parents or children.
+#
+#        """
+#        return _IterOrphans(self._graph_nodes.itervalues())
+#
+#    cpdef children(self, node):
+#        """ children(node)
+#
+#        Return the children of a given node.
+#
+#        The children of a node are those nodes directly below 
+#        the given node in the graph. If the given node is not 
+#        contained in the graph, a GraphError is raised.
+#
+#        Parameters
+#        ----------
+#        node : hashable object
+#            The parent node.
+#
+#        Returns
+#        -------
+#        out : list
+#            The children of the given node. Will be empty if the
+#            node has no children.
+#
+#        """
+#        if not self.contains(node):
+#            raise GraphError("Node `%s` does not exist in the graph." % node)
+#
+#        graph_node = self.get_node(node)
+#        return _IterContent(iter(graph_node.parents))
+#
+#    cpdef parents(self, node):
+#        """ parents(node)
+#
+#        Return the parents of a given node.
+#
+#        The parents of a node are those nodes directly above 
+#        the given node in the graph. A node may have more than 
+#        one parent. If the given node is not contained in the 
+#        graph, a GraphError is raised.
+#
+#        Parameters
+#        ----------
+#        node : hashable object
+#            The child node.
+#
+#        Returns
+#        -------
+#        out : list
+#            The parents of the given node. Will be empty if the
+#            node has no parents.
+#
+#        """
+#        if not self.contains(node):
+#            raise GraphError("Node `%s` does not exist in the graph." % node)
+#        
+#        graph_node = self.get_node(node)
+#        return _IterContent(iter(graph_node.parents))
 
     #------------------------------------------------------------------
     # Graph traversal
     #------------------------------------------------------------------
-    cpdef traverse(self, node, descend=True, dfs=True, level=False):
+    cpdef traverse(self, node, bint descend=True, bint dfs=True, bint level=False):
         """ traverse(node, descend=True, dfs=True, level=False)
 
         Returns an iterator that performs a search through the graph.
@@ -1168,23 +1306,23 @@ cdef class DAGraph(object):
         if descend:
             if dfs:
                 if level:
-                    return _IterDFSDownLevel(graph_node)
+                    return _IterDFSDown(graph_node)
                 else:
                     return _IterDFSDown(graph_node)
             else:
                 if level:
-                    return _IterBFSDownLevel(graph_node)
+                    return _IterBFSDown(graph_node)
                 else:
                     return _IterBFSDown(graph_node)
         else:
             if dfs:
                 if level:
-                    return _IterDFSUpLevel(graph_node)
+                    return _IterDFSUp(graph_node)
                 else:
                     return _IterDFSUp(graph_node)
             else:
                 if level:
-                    return _IterBFSUpLevel(graph_node)
+                    return _IterBFSUp(graph_node)
                 else:
                     return _IterBFSUp(graph_node)
 
