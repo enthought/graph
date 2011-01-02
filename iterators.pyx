@@ -26,6 +26,7 @@ cdef class IterDFSDown(object):
 
     def __next__(self):
         cdef Stack stack = self._stack
+        cdef DAGNode curr
 
         if stack.empty():
             raise StopIteration
@@ -55,6 +56,7 @@ cdef class IterDFSUp(object):
 
     def __next__(self):
         cdef Stack stack = self._stack
+        cdef DAGNode curr
 
         if stack.empty():
             raise StopIteration
@@ -84,6 +86,7 @@ cdef class IterBFSDown(object):
 
     def __next__(self):
         cdef Queue queue = self._queue
+        cdef DAGNode curr
 
         if queue.empty():
             raise StopIteration
@@ -113,8 +116,9 @@ cdef class IterBFSUp(object):
 
     def __next__(self):
         cdef Queue queue = self._queue
+        cdef DAGNode curr
 
-        if not queue.empty():
+        if queue.empty():
             raise StopIteration
 
         curr = <DAGNode>queue.pop()
@@ -133,7 +137,7 @@ cdef class IterDFSDownLevel(object):
         cdef Stack stack = Stack(512)
 
         for child in start_node.children:
-            stack.push(child)
+            stack.push((child, 1))
 
         self._stack = stack
 
@@ -142,15 +146,22 @@ cdef class IterDFSDownLevel(object):
 
     def __next__(self):
         cdef Stack stack = self._stack
+        cdef DAGNode curr
+        cdef long curr_level
+        cdef long new_level
 
         if stack.empty():
             raise StopIteration
 
-        curr = <DAGNode>stack.pop()
-        for child in curr.children:
-            stack.push(child)
+        py_node, py_level = <tuple>stack.pop()
+        curr = <DAGNode>py_node
+        curr_level = <long>py_level
+        new_level = curr_level + 1
 
-        return curr.content
+        for child in curr.children:
+            stack.push((child, new_level))
+
+        return (curr.content, py_level)
 
 
 cdef class IterDFSUpLevel(object):
@@ -162,7 +173,7 @@ cdef class IterDFSUpLevel(object):
         cdef Stack stack = Stack(512)
 
         for parent in start_node.parents:
-            stack.push(parent)
+            stack.push((parent, 1))
 
         self._stack = stack
 
@@ -171,15 +182,22 @@ cdef class IterDFSUpLevel(object):
 
     def __next__(self):
         cdef Stack stack = self._stack
+        cdef DAGNode curr
+        cdef long curr_level
+        cdef long new_level
 
         if stack.empty():
             raise StopIteration
 
-        curr = <DAGNode>stack.pop()
-        for parent in curr.parents:
-            stack.push(parent)
+        py_node, py_level = <tuple>stack.pop()
+        curr = <DAGNode>py_node
+        curr_level = <long>py_level
+        new_level = curr_level + 1
 
-        return curr.content
+        for parent in curr.parents:
+            stack.push((parent, new_level))
+
+        return (curr.content, py_level)
 
  
 cdef class IterBFSDownLevel(object):
@@ -191,7 +209,7 @@ cdef class IterBFSDownLevel(object):
         cdef Queue queue = Queue(512)
         
         for child in start_node.children:
-            queue.push(child)
+            queue.push((child, 1))
 
         self._queue = queue
 
@@ -200,15 +218,22 @@ cdef class IterBFSDownLevel(object):
 
     def __next__(self):
         cdef Queue queue = self._queue
+        cdef DAGNode curr
+        cdef long curr_level
+        cdef long new_level
 
         if queue.empty():
             raise StopIteration
+        
+        py_node, py_level = <tuple>queue.pop()
+        curr = <DAGNode>py_node
+        curr_level = <long>py_level
+        new_level = curr_level + 1
 
-        curr = <DAGNode>queue.pop()
         for child in curr.children:
-            queue.push(child)
+            queue.push((child, new_level))
 
-        return curr.content
+        return (curr.content, py_level)
  
 
 cdef class IterBFSUpLevel(object):
@@ -220,7 +245,7 @@ cdef class IterBFSUpLevel(object):
         cdef Queue queue = Queue(512)
 
         for parent in start_node.parents:
-            queue.push(parent)
+            queue.push((parent, 1))
 
         self._queue = queue
 
@@ -229,15 +254,22 @@ cdef class IterBFSUpLevel(object):
 
     def __next__(self):
         cdef Queue queue = self._queue
+        cdef DAGNode curr
+        cdef long curr_level
+        cdef long new_level
 
-        if not queue.empty():
+        if queue.empty():
             raise StopIteration
 
-        curr = <DAGNode>queue.pop()
-        for parent in curr.parents:
-            queue.push(parent)
+        py_node, py_level = <tuple>queue.pop()
+        curr = <DAGNode>py_node
+        curr_level = <long>py_level
+        new_level = curr_level + 1
 
-        return curr.content
+        for parent in curr.parents:
+            queue.push((parent, new_level))
+
+        return (curr.content, py_level)
 
 
 cdef class IterParentless(object):
