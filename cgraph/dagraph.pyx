@@ -693,10 +693,10 @@ cdef class DAGraph(object):
             node = self.get_node_fast(content)
         
             for parent in node.parents:
-                parent.remove_child(node)
+                (<DAGNode>parent).remove_child(node)
 
             for child in node.children:
-                child.remove_parent(node)
+                (<DAGNode>child).remove_parent(node)
 
             del self._graph_nodes[content]
 
