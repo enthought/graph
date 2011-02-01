@@ -13,7 +13,7 @@ cdef class IterDFSDown(object):
     from a given node. 
     
     """
-    def __init__(self, DAGNode start_node):
+    def __cinit__(self, DAGNode start_node):
         cdef Stack stack = Stack(512)
 
         for child in start_node.children:
@@ -43,7 +43,7 @@ cdef class IterDFSUp(object):
     from a given node. 
     
     """
-    def __init__(self, DAGNode start_node):
+    def __cinit__(self, DAGNode start_node):
         cdef Stack stack = Stack(512)
 
         for parent in start_node.parents:
@@ -73,7 +73,7 @@ cdef class IterBFSDown(object):
     from a given node. 
     
     """
-    def __init__(self, DAGNode start_node):
+    def __cinit__(self, DAGNode start_node):
         cdef Queue queue = Queue(512)
         
         for child in start_node.children:
@@ -103,7 +103,7 @@ cdef class IterBFSUp(object):
     from a given node. 
     
     """
-    def __init__(self, DAGNode start_node):
+    def __cinit__(self, DAGNode start_node):
         cdef Queue queue = Queue(512)
 
         for parent in start_node.parents:
@@ -133,7 +133,7 @@ cdef class IterDFSDownLevel(object):
     from a given node. 
     
     """
-    def __init__(self, DAGNode start_node):
+    def __cinit__(self, DAGNode start_node):
         cdef Stack stack = Stack(512)
 
         for child in start_node.children:
@@ -169,7 +169,7 @@ cdef class IterDFSUpLevel(object):
     from a given node. 
     
     """
-    def __init__(self, DAGNode start_node):
+    def __cinit__(self, DAGNode start_node):
         cdef Stack stack = Stack(512)
 
         for parent in start_node.parents:
@@ -205,7 +205,7 @@ cdef class IterBFSDownLevel(object):
     from a given node. 
     
     """
-    def __init__(self, DAGNode start_node):
+    def __cinit__(self, DAGNode start_node):
         cdef Queue queue = Queue(512)
         
         for child in start_node.children:
@@ -241,7 +241,7 @@ cdef class IterBFSUpLevel(object):
     from a given node. 
     
     """
-    def __init__(self, DAGNode start_node):
+    def __cinit__(self, DAGNode start_node):
         cdef Queue queue = Queue(512)
 
         for parent in start_node.parents:
